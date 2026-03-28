@@ -63,6 +63,12 @@ type App struct {
 type AppConfig struct {
 	LastConnection *LastConnection `json:"lastConnection,omitempty"`
 	Favorites      []Favorite      `json:"favorites"`
+	Settings       *Settings       `json:"settings,omitempty"`
+}
+
+// Settings represents user preferences
+type Settings struct {
+	GroupBy string `json:"groupBy"`
 }
 
 // LastConnection represents the last used connection settings
@@ -421,6 +427,36 @@ func (a *App) GetFavorites() []Favorite {
 	favorites := make([]Favorite, len(a.config.Favorites))
 	copy(favorites, a.config.Favorites)
 	return favorites
+}
+
+// GetGroupByMode returns the current grouping mode for the sidebar
+func (a *App) GetGroupByMode() string {
+	a.configMu.RLock()
+	defer a.configMu.RUnlock()
+
+	if a.config == nil || a.config.Settings == nil || a.config.Settings.GroupBy == "" {
+		return "none"
+	}
+	return a.config.Settings.GroupBy
+}
+
+// SetGroupByMode sets the grouping mode for the sidebar
+func (a *App) SetGroupByMode(mode string) error {
+	if mode != "none" && mode != "project" && mode != "project-region" {
+		return fmt.Errorf("invalid group-by mode: %s", mode)
+	}
+
+	a.configMu.Lock()
+	defer a.configMu.Unlock()
+
+	if a.config == nil {
+		a.config = &AppConfig{}
+	}
+	if a.config.Settings == nil {
+		a.config.Settings = &Settings{}
+	}
+	a.config.Settings.GroupBy = mode
+	return a.saveConfig()
 }
 
 // AddFavorite adds a new favorite connection

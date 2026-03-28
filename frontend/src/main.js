@@ -19,7 +19,12 @@ const state = {
     isStartingTunnel: false,
     vmStatus: null,           // Current VM status for selected connection
     vmStatusRequestId: 0,     // Guard against stale async VM status results
+    vmStatuses: {},           // VM statuses for sidebar icons, keyed by connection ID
     isVmOperationInProgress: false, // True while a start/stop VM operation is running
+    contextMenuConnection: null,    // Connection targeted by right-click context menu
+    groupByMode: 'none',        // 'none', 'project', 'project-region'
+    collapsedGroups: new Set(),  // Set of collapsed group keys
+    groupedConnections: null,    // Cached grouped structure
     currentView: 'new', // 'new', 'details', 'empty'
     pendingRestartNotification: false // Flag to show restart notification after password modal closes
 };
@@ -43,6 +48,7 @@ const elements = {
     openWindowsAppBtn: document.getElementById('open-windows-app-btn'),
     // Connections panel
     connectionsList: document.getElementById('connections-list'),
+    groupBySelect: document.getElementById('group-by-select'),
     newConnectionBtn: document.getElementById('new-connection-btn'),
     // Views
     connectionDetailsView: document.getElementById('connection-details-view'),
@@ -64,9 +70,13 @@ const elements = {
     detailAddress: document.getElementById('detail-address'),
     startVmBtn: document.getElementById('start-vm-btn'),
     stopVmBtn: document.getElementById('stop-vm-btn'),
-    startTunnelBtn: document.getElementById('start-tunnel-btn'),
+    // Context menu
+    contextMenu: document.getElementById('connection-context-menu'),
+    ctxStartVm: document.getElementById('ctx-start-vm'),
+    ctxStopVm: document.getElementById('ctx-stop-vm'),
+    ctxDeleteConnection: document.getElementById('ctx-delete-connection'),
+    toggleTunnelBtn: document.getElementById('toggle-tunnel-btn'),
     connectFreeRDPBtn: document.getElementById('connect-freerdp-btn'),
-    stopTunnelBtn: document.getElementById('stop-tunnel-btn'),
     copyAddressBtn: document.getElementById('copy-address-btn'),
     copyLogsBtn: document.getElementById('copy-logs-btn'),
     clearLogsBtn: document.getElementById('clear-logs-btn'),
@@ -133,7 +143,9 @@ async function init() {
     await checkAuth();
     await checkWindowsApp();
     await checkFreeRDP();
+    await loadGroupByMode();
     await loadConnections();
+    fetchAllVmStatuses(); // Fire and forget — don't block init
     await loadProjects();
     await loadTunnels();
     setupEventListeners();
@@ -317,6 +329,71 @@ async function checkFreeRDP() {
     updateButtons();
 }
 
+// ==================== Grouping ====================
+
+async function loadGroupByMode() {
+    try {
+        const mode = await window.go.main.App.GetGroupByMode();
+        state.groupByMode = mode || 'none';
+        elements.groupBySelect.value = state.groupByMode;
+    } catch (err) {
+        console.error('Failed to load group-by mode:', err);
+        state.groupByMode = 'none';
+    }
+}
+
+function computeGroupedConnections() {
+    if (state.groupByMode === 'none') {
+        state.groupedConnections = null;
+        return;
+    }
+
+    const connsByProject = {};
+    for (const conn of state.connections) {
+        const projectKey = conn.projectId;
+        if (!connsByProject[projectKey]) {
+            connsByProject[projectKey] = {
+                key: `project:${projectKey}`,
+                name: conn.projectName || conn.projectId,
+                connections: [],
+                subgroups: null
+            };
+        }
+        connsByProject[projectKey].connections.push(conn);
+    }
+
+    const groups = Object.values(connsByProject).sort((a, b) => a.name.localeCompare(b.name));
+
+    if (state.groupByMode === 'project-region') {
+        for (const group of groups) {
+            const connsByRegion = {};
+            for (const conn of group.connections) {
+                const region = conn.zone.replace(/-[a-z]$/, '');
+                if (!connsByRegion[region]) {
+                    connsByRegion[region] = {
+                        key: `region:${conn.projectId}:${region}`,
+                        name: region,
+                        connections: []
+                    };
+                }
+                connsByRegion[region].connections.push(conn);
+            }
+            const subgroups = Object.values(connsByRegion).sort((a, b) => a.name.localeCompare(b.name));
+            for (const sg of subgroups) {
+                sg.connections.sort((a, b) => a.name.localeCompare(b.name));
+            }
+            group.subgroups = subgroups;
+            group.connections = [];
+        }
+    } else {
+        for (const group of groups) {
+            group.connections.sort((a, b) => a.name.localeCompare(b.name));
+        }
+    }
+
+    state.groupedConnections = groups;
+}
+
 // ==================== Connections (Saved) ====================
 
 async function loadConnections() {
@@ -335,6 +412,7 @@ async function loadConnections() {
             hasBookmark: f.hasBookmark || false,
             bookmarkHasCreds: f.bookmarkHasCreds || false
         }));
+        computeGroupedConnections();
         renderConnectionsList();
     } catch (error) {
         console.error('Failed to load connections:', error);
@@ -342,32 +420,111 @@ async function loadConnections() {
     }
 }
 
+function renderConnectionItem(conn) {
+    const isSelected = state.selectedConnection?.id === conn.id;
+    const tunnelsForConn = getConnectionTunnels(conn);
+    const hasRunning = tunnelsForConn.some(t => t.status === 'running' || t.status === 'starting');
+    const statusClass = hasRunning ? (tunnelsForConn.some(t => t.status === 'running') ? 'running' : 'starting') : '';
+
+    const vmIcon = vmStatusIcon(state.vmStatuses[conn.id]);
+    const tunnelIcon = tunnelStatusIcon(statusClass);
+
+    return `
+        <div class="connection-item ${isSelected ? 'selected' : ''}" data-connection-id="${conn.id}">
+            <div class="connection-item-name">
+                ${vmIcon}
+                ${escapeHtml(conn.name)}
+                ${tunnelIcon}
+            </div>
+            <div class="connection-item-details">${escapeHtml(conn.vmName)} • ${escapeHtml(conn.zone)}</div>
+        </div>
+    `;
+}
+
+function chevronIcon(collapsed) {
+    return `<svg class="group-chevron ${collapsed ? '' : 'group-chevron-expanded'}" width="10" height="10" viewBox="0 0 10 10">
+        <path d="M3 2L7 5L3 8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>`;
+}
+
 function renderConnectionsList() {
     if (state.connections.length === 0) {
         elements.connectionsList.innerHTML = '<div class="connections-empty">No saved connections yet</div>';
         return;
     }
-    
-    elements.connectionsList.innerHTML = state.connections.map(conn => {
-        const isSelected = state.selectedConnection?.id === conn.id;
-        const tunnelsForConn = getConnectionTunnels(conn);
-        const hasRunning = tunnelsForConn.some(t => t.status === 'running' || t.status === 'starting');
-        const statusClass = hasRunning ? (tunnelsForConn.some(t => t.status === 'running') ? 'running' : 'starting') : '';
-        
-        return `
-            <div class="connection-item ${isSelected ? 'selected' : ''}" data-connection-id="${conn.id}">
-                <div class="connection-item-name">
-                    <span class="connection-item-status ${statusClass}"></span>
-                    ${escapeHtml(conn.name)}
+
+    if (state.groupByMode === 'none' || !state.groupedConnections) {
+        // Flat list
+        elements.connectionsList.innerHTML = state.connections.map(conn => renderConnectionItem(conn)).join('');
+    } else if (state.groupByMode === 'project') {
+        elements.connectionsList.innerHTML = state.groupedConnections.map(group => {
+            const collapsed = state.collapsedGroups.has(group.key);
+            return `
+                <div class="connection-group">
+                    <div class="connection-group-header" data-group-key="${group.key}">
+                        ${chevronIcon(collapsed)}
+                        <span class="connection-group-name">${escapeHtml(group.name)}</span>
+                        <span class="connection-group-count">${group.connections.length}</span>
+                    </div>
+                    ${collapsed ? '' : `<div class="connection-group-items">
+                        ${group.connections.map(conn => renderConnectionItem(conn)).join('')}
+                    </div>`}
                 </div>
-                <div class="connection-item-details">${escapeHtml(conn.vmName)} • ${escapeHtml(conn.zone)}</div>
-            </div>
-        `;
-    }).join('');
-    
-    // Add click handlers
+            `;
+        }).join('');
+    } else if (state.groupByMode === 'project-region') {
+        elements.connectionsList.innerHTML = state.groupedConnections.map(group => {
+            const projectCollapsed = state.collapsedGroups.has(group.key);
+            const totalCount = group.subgroups.reduce((sum, sg) => sum + sg.connections.length, 0);
+            return `
+                <div class="connection-group">
+                    <div class="connection-group-header" data-group-key="${group.key}">
+                        ${chevronIcon(projectCollapsed)}
+                        <span class="connection-group-name">${escapeHtml(group.name)}</span>
+                        <span class="connection-group-count">${totalCount}</span>
+                    </div>
+                    ${projectCollapsed ? '' : `<div class="connection-group-items">
+                        ${group.subgroups.map(sg => {
+                            const regionCollapsed = state.collapsedGroups.has(sg.key);
+                            return `
+                                <div class="connection-subgroup">
+                                    <div class="connection-subgroup-header" data-group-key="${sg.key}">
+                                        ${chevronIcon(regionCollapsed)}
+                                        <span class="connection-group-name">${escapeHtml(sg.name)}</span>
+                                        <span class="connection-group-count">${sg.connections.length}</span>
+                                    </div>
+                                    ${regionCollapsed ? '' : `<div class="connection-subgroup-items">
+                                        ${sg.connections.map(conn => renderConnectionItem(conn)).join('')}
+                                    </div>`}
+                                </div>
+                            `;
+                        }).join('')}
+                    </div>`}
+                </div>
+            `;
+        }).join('');
+    }
+
+    // Add click and context menu handlers for connection items
     elements.connectionsList.querySelectorAll('.connection-item').forEach(item => {
         item.addEventListener('click', () => selectConnection(item.dataset.connectionId));
+        item.addEventListener('contextmenu', (e) => {
+            const conn = state.connections.find(c => c.id === item.dataset.connectionId);
+            if (conn) showContextMenu(e, conn);
+        });
+    });
+
+    // Add collapse/expand handlers for group headers
+    elements.connectionsList.querySelectorAll('.connection-group-header, .connection-subgroup-header').forEach(header => {
+        header.addEventListener('click', () => {
+            const key = header.dataset.groupKey;
+            if (state.collapsedGroups.has(key)) {
+                state.collapsedGroups.delete(key);
+            } else {
+                state.collapsedGroups.add(key);
+            }
+            renderConnectionsList();
+        });
     });
 }
 
@@ -780,13 +937,13 @@ async function startTunnel() {
     if (!state.selectedConnection || state.isStartingTunnel) return;
     
     state.isStartingTunnel = true;
-    elements.startTunnelBtn.disabled = true;
-    elements.startTunnelBtn.textContent = 'Starting...';
-    
+    elements.toggleTunnelBtn.disabled = true;
+    elements.toggleTunnelBtn.textContent = 'Starting...';
+
     try {
         // Use the connection's fixed port
         const tunnel = await window.go.main.App.StartTunnelForConnection(state.selectedConnection.id);
-        
+
         state.tunnels.unshift(tunnel);
         state.selectedTunnel = tunnel;
         updateConnectionStatus();
@@ -797,7 +954,6 @@ async function startTunnel() {
         showToast('Failed to start tunnel: ' + errorMsg, 'error');
     } finally {
         state.isStartingTunnel = false;
-        elements.startTunnelBtn.textContent = 'Start Tunnel';
         updateButtons();
     }
 }
@@ -860,24 +1016,23 @@ async function stopTunnel() {
     const activeTunnel = getActiveConnectionTunnel(state.selectedConnection);
     if (!activeTunnel) return;
     
-    elements.stopTunnelBtn.disabled = true;
-    elements.stopTunnelBtn.textContent = 'Stopping...';
-    
+    elements.toggleTunnelBtn.disabled = true;
+    elements.toggleTunnelBtn.textContent = 'Stopping...';
+
     try {
         await window.go.main.App.StopTunnel(activeTunnel.id);
-        
+
         const idx = state.tunnels.findIndex(t => t.id === activeTunnel.id);
         if (idx >= 0) {
             state.tunnels[idx].status = 'stopped';
         }
-        
+
         updateConnectionStatus();
         renderConnectionsList();
         showToast('Tunnel stopped', 'success');
     } catch (error) {
         showToast('Failed to stop tunnel: ' + error.message, 'error');
     } finally {
-        elements.stopTunnelBtn.textContent = 'Stop Tunnel';
         updateButtons();
     }
 }
@@ -1258,6 +1413,8 @@ async function startVM(conn) {
         await window.go.main.App.StartVM(conn.projectId, conn.zone, conn.vmName);
         showToast('VM started successfully', 'success');
         // Refresh status after operation
+        state.vmStatuses[conn.id] = 'RUNNING';
+        renderConnectionsList();
         await fetchVmStatus(conn);
     } catch (error) {
         showToast('Failed to start VM: ' + (error?.message || String(error)), 'error');
@@ -1286,6 +1443,8 @@ async function stopVM(conn) {
         await window.go.main.App.StopVM(conn.projectId, conn.zone, conn.vmName);
         showToast('VM stopped successfully', 'success');
         // Refresh status after operation
+        state.vmStatuses[conn.id] = 'STOPPED';
+        renderConnectionsList();
         await fetchVmStatus(conn);
     } catch (error) {
         showToast('Failed to stop VM: ' + (error?.message || String(error)), 'error');
@@ -1294,6 +1453,124 @@ async function stopVM(conn) {
         hideLoadingModal();
         updateButtons();
     }
+}
+
+// ==================== Context Menu ====================
+
+function showContextMenu(e, conn) {
+    e.preventDefault();
+    state.contextMenuConnection = conn;
+
+    const menu = elements.contextMenu;
+
+    // Position at cursor, clamped to viewport
+    let x = e.clientX;
+    let y = e.clientY;
+    menu.classList.remove('hidden');
+    const rect = menu.getBoundingClientRect();
+    if (x + rect.width > window.innerWidth) x = window.innerWidth - rect.width - 4;
+    if (y + rect.height > window.innerHeight) y = window.innerHeight - rect.height - 4;
+    menu.style.left = `${x}px`;
+    menu.style.top = `${y}px`;
+
+    // Fetch VM status for this connection and update menu items
+    elements.ctxStartVm.disabled = true;
+    elements.ctxStopVm.disabled = true;
+
+    window.go.main.App.GetVMStatus(conn.projectId, conn.zone, conn.vmName).then(status => {
+        if (state.contextMenuConnection?.id !== conn.id) return;
+        elements.ctxStartVm.disabled = !(status === 'STOPPED' || status === 'TERMINATED');
+        elements.ctxStopVm.disabled = !(status === 'RUNNING');
+    }).catch(() => {
+        // Leave buttons disabled if status fetch fails
+    });
+}
+
+function hideContextMenu() {
+    elements.contextMenu.classList.add('hidden');
+    state.contextMenuConnection = null;
+}
+
+// ==================== Sidebar Icons ====================
+
+function tunnelStatusIcon(statusClass) {
+    const size = 14;
+    if (statusClass === 'running') {
+        return `<svg class="tunnel-status-icon" title="Tunnel connected" width="${size}" height="${size}" viewBox="0 0 512 512" fill="#06d6a0">
+            <title>Tunnel connected</title>
+            <path d="M180.575277,150.405387 L195.660221,165.490332 C232.149762,128.999792 288.499134,124.474169 329.914914,151.912465 L415.685003,66.1441078 L445.855892,96.3139972 L360.086535,182.085086 C387.524831,223.500866 382.999208,279.850238 346.509668,316.339779 L361.594613,331.424723 L331.424723,361.594613 L316.339779,346.509668 C279.850238,382.999208 223.500866,387.524831 182.085086,360.086535 L96.3139972,445.855892 L66.1441078,415.685003 L151.912465,329.914914 C124.474169,288.499134 128.999792,232.149762 165.490332,195.660221 L150.405387,180.575277 L180.575277,150.405387 Z M195.660221,225.830111 C170.666667,250.823665 170.666667,291.346224 195.660221,316.339779 C219.761149,340.440706 258.301674,341.301454 283.434001,318.922021 L286.169889,316.339779 L195.660221,225.830111 Z M225.830111,195.660221 L316.339779,286.169889 C341.333333,261.176335 341.333333,220.653776 316.339779,195.660221 C292.238851,171.559294 253.698326,170.698546 228.565999,193.077979 L225.830111,195.660221 Z"/>
+        </svg>`;
+    } else if (statusClass === 'starting') {
+        return `<svg class="tunnel-status-icon tunnel-status-icon-starting" title="Tunnel starting" width="${size}" height="${size}" viewBox="0 0 512 512" fill="#ffd166">
+            <title>Tunnel starting</title>
+            <path d="M180.575277,150.405387 L195.660221,165.490332 C232.149762,128.999792 288.499134,124.474169 329.914914,151.912465 L415.685003,66.1441078 L445.855892,96.3139972 L360.086535,182.085086 C387.524831,223.500866 382.999208,279.850238 346.509668,316.339779 L361.594613,331.424723 L331.424723,361.594613 L316.339779,346.509668 C279.850238,382.999208 223.500866,387.524831 182.085086,360.086535 L96.3139972,445.855892 L66.1441078,415.685003 L151.912465,329.914914 C124.474169,288.499134 128.999792,232.149762 165.490332,195.660221 L150.405387,180.575277 L180.575277,150.405387 Z M195.660221,225.830111 C170.666667,250.823665 170.666667,291.346224 195.660221,316.339779 C219.761149,340.440706 258.301674,341.301454 283.434001,318.922021 L286.169889,316.339779 L195.660221,225.830111 Z M225.830111,195.660221 L316.339779,286.169889 C341.333333,261.176335 341.333333,220.653776 316.339779,195.660221 C292.238851,171.559294 253.698326,170.698546 228.565999,193.077979 L225.830111,195.660221 Z"/>
+        </svg>`;
+    } else {
+        return `<svg class="tunnel-status-icon" title="Tunnel disconnected" width="${size}" height="${size}" viewBox="0 0 512 512" fill="#a0a0a0">
+            <title>Tunnel disconnected</title>
+            <path d="M109.720439,221.260209 L147.431997,258.972903 L172.49678,233.908614 L202.666664,264.078498 L177.602122,289.143028 L222.856956,334.397862 L247.921505,309.333339 L278.091388,339.503222 L253.026374,364.56728 L290.739775,402.279545 L260.569885,432.449434 L245.484945,417.364494 C208.995405,453.854034 152.646032,458.37966 111.230253,430.941365 L74.9806593,467.189217 L44.810777,437.019328 L81.0586316,400.769744 C53.620336,359.353964 58.1459583,302.004588 94.6354986,266.515047 L79.5505493,251.430098 L109.720439,221.260209 Z M124.805397,296.944946 C99.8118426,321.938501 99.8118426,362.461045 124.805397,387.454599 C148.906325,411.555527 187.44683,412.416283 212.579157,390.03685 L215.315065,387.454614 L124.805397,296.944946 Z M437.019328,44.8107696 L467.189217,74.9806589 L420.274702,121.896916 C447.712996,163.312696 443.187371,219.662068 406.697831,256.151609 L421.782781,271.236559 L391.612893,301.406447 L210.593557,120.387111 L240.763445,90.2172233 L255.848384,105.302162 C292.337924,68.8126217 348.6873,64.2869993 390.10308,91.7252949 L437.019328,44.8107696 Z M288.754176,133.289811 L285.018283,135.872061 L375.395311,226.249259 C393.131073,199.331227 398.047614,158.391738 376.527936,136.872061 C352.427008,112.771133 313.886503,111.910377 288.754176,134.28981 L288.754176,133.289811 Z"/>
+        </svg>`;
+    }
+}
+
+function vmStatusIcon(status) {
+    const size = 12;
+    if (!status) {
+        // Unknown/loading — gray open circle
+        return `<svg class="vm-status-icon" width="${size}" height="${size}" viewBox="0 0 12 12">
+            <title>VM status unknown</title>
+            <circle cx="6" cy="6" r="4.5" fill="none" stroke="#a0a0a0" stroke-width="1.5"/>
+        </svg>`;
+    }
+    switch (status) {
+        case 'RUNNING':
+            // Green filled circle
+            return `<svg class="vm-status-icon" width="${size}" height="${size}" viewBox="0 0 12 12">
+                <title>VM running</title>
+                <circle cx="6" cy="6" r="4.5" fill="#06d6a0"/>
+            </svg>`;
+        case 'STOPPED':
+        case 'TERMINATED':
+            // Red open circle
+            return `<svg class="vm-status-icon" width="${size}" height="${size}" viewBox="0 0 12 12">
+                <title>VM ${status.toLowerCase()}</title>
+                <circle cx="6" cy="6" r="4.5" fill="none" stroke="#ef476f" stroke-width="1.5"/>
+            </svg>`;
+        case 'STAGING':
+        case 'STOPPING':
+        case 'SUSPENDING':
+        case 'PROVISIONING':
+            // Yellow half-filled circle (transitional)
+            return `<svg class="vm-status-icon vm-status-icon-transitional" width="${size}" height="${size}" viewBox="0 0 12 12">
+                <title>VM ${status.toLowerCase()}</title>
+                <circle cx="6" cy="6" r="4.5" fill="none" stroke="#ffd166" stroke-width="1.5"/>
+                <path d="M6 1.5 A4.5 4.5 0 0 1 6 10.5 Z" fill="#ffd166"/>
+            </svg>`;
+        default:
+            // Gray open circle for any other state
+            return `<svg class="vm-status-icon" width="${size}" height="${size}" viewBox="0 0 12 12">
+                <title>VM ${status.toLowerCase()}</title>
+                <circle cx="6" cy="6" r="4.5" fill="none" stroke="#a0a0a0" stroke-width="1.5"/>
+            </svg>`;
+    }
+}
+
+async function fetchAllVmStatuses() {
+    const connections = state.connections;
+    if (connections.length === 0) return;
+
+    // Fetch all in parallel, don't block on individual failures
+    const promises = connections.map(async (conn) => {
+        try {
+            const status = await window.go.main.App.GetVMStatus(conn.projectId, conn.zone, conn.vmName);
+            state.vmStatuses[conn.id] = status;
+        } catch {
+            // Leave as unknown on failure
+        }
+    });
+
+    await Promise.all(promises);
+    renderConnectionsList();
 }
 
 // ==================== VM Status ====================
@@ -1377,10 +1654,20 @@ function updateButtons() {
         const hasActive = activeTunnel != null;
         const isRunning = activeTunnel && activeTunnel.status === 'running';
 
-        elements.startTunnelBtn.disabled = state.isStartingTunnel || hasActive;
+        // Toggle tunnel button between Start/Stop
+        if (hasActive) {
+            elements.toggleTunnelBtn.textContent = 'Stop Tunnel';
+            elements.toggleTunnelBtn.classList.remove('btn-primary');
+            elements.toggleTunnelBtn.classList.add('btn-danger');
+            elements.toggleTunnelBtn.disabled = false;
+        } else {
+            elements.toggleTunnelBtn.textContent = 'Start Tunnel';
+            elements.toggleTunnelBtn.classList.remove('btn-danger');
+            elements.toggleTunnelBtn.classList.add('btn-primary');
+            elements.toggleTunnelBtn.disabled = state.isStartingTunnel;
+        }
         elements.connectFreeRDPBtn.disabled = !state.freeRDPInstalled || state.isStartingTunnel || (hasActive && !isRunning);
         elements.connectFreeRDPBtn.classList.toggle('hidden', !state.freeRDPInstalled);
-        elements.stopTunnelBtn.disabled = !hasActive;
         elements.copyAddressBtn.disabled = false; // Always enabled - port is fixed
 
         // VM control buttons
@@ -1460,6 +1747,18 @@ function setupEventListeners() {
     elements.openWindowsAppBtn.addEventListener('click', openWindowsApp);
     
     // Connections panel
+    elements.groupBySelect.addEventListener('change', async () => {
+        const mode = elements.groupBySelect.value;
+        state.groupByMode = mode;
+        state.collapsedGroups.clear();
+        computeGroupedConnections();
+        renderConnectionsList();
+        try {
+            await window.go.main.App.SetGroupByMode(mode);
+        } catch (err) {
+            console.error('Failed to save group-by mode:', err);
+        }
+    });
     elements.newConnectionBtn.addEventListener('click', showNewConnectionForm);
     
     // Details view
@@ -1472,9 +1771,17 @@ function setupEventListeners() {
     });
     elements.startVmBtn.addEventListener('click', () => startVM());
     elements.stopVmBtn.addEventListener('click', () => stopVM());
-    elements.startTunnelBtn.addEventListener('click', startTunnel);
+    elements.toggleTunnelBtn.addEventListener('click', () => {
+        if (state.selectedConnection) {
+            const activeTunnel = getActiveConnectionTunnel(state.selectedConnection);
+            if (activeTunnel) {
+                stopTunnel();
+            } else {
+                startTunnel();
+            }
+        }
+    });
     elements.connectFreeRDPBtn.addEventListener('click', connectWithFreeRDP);
-    elements.stopTunnelBtn.addEventListener('click', stopTunnel);
     elements.copyAddressBtn.addEventListener('click', copyAddress);
     elements.copyLogsBtn.addEventListener('click', copyLogs);
     elements.clearLogsBtn.addEventListener('click', () => {
@@ -1485,6 +1792,34 @@ function setupEventListeners() {
     elements.cancelConnectionBtn.addEventListener('click', cancelNewConnection);
     elements.saveConnectionBtn.addEventListener('click', saveConnection);
     
+    // Context menu
+    elements.ctxStartVm.addEventListener('click', () => {
+        const conn = state.contextMenuConnection;
+        hideContextMenu();
+        if (conn) startVM(conn);
+    });
+    elements.ctxStopVm.addEventListener('click', () => {
+        const conn = state.contextMenuConnection;
+        hideContextMenu();
+        if (conn) stopVM(conn);
+    });
+    elements.ctxDeleteConnection.addEventListener('click', () => {
+        const conn = state.contextMenuConnection;
+        hideContextMenu();
+        if (conn) {
+            // Select the connection first so deleteConnection operates on it
+            selectConnection(conn.id);
+            deleteConnection();
+        }
+    });
+    document.addEventListener('click', (e) => {
+        if (!elements.contextMenu.contains(e.target)) hideContextMenu();
+    });
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') hideContextMenu();
+    });
+    window.addEventListener('scroll', hideContextMenu, true);
+
     // Panel footer buttons
     elements.stopAllBtn.addEventListener('click', stopAllTunnels);
     

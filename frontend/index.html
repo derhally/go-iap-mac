@@ -81,6 +81,13 @@
                         <h2>Saved Connections</h2>
                         <button id="new-connection-btn" class="btn btn-primary btn-small">+ New</button>
                     </div>
+                    <div class="panel-toolbar">
+                        <select id="group-by-select" class="group-by-select" title="Group connections">
+                            <option value="none">No grouping</option>
+                            <option value="project">By Project</option>
+                            <option value="project-region">By Project &amp; Region</option>
+                        </select>
+                    </div>
                     <div class="panel-content">
                         <div id="connections-list" class="connections-list">
                             <div class="connections-empty">No saved connections yet</div>
@@ -90,6 +97,20 @@
                         <button id="stop-all-btn" class="btn btn-small btn-danger-outline" title="Stop all running tunnels">Stop All</button>
                     </div>
                 </section>
+
+                <!-- Connection Context Menu -->
+                <div id="connection-context-menu" class="context-menu hidden">
+                    <button id="ctx-start-vm" class="menu-item" disabled>
+                        <span class="menu-icon">▶</span> Start VM
+                    </button>
+                    <button id="ctx-stop-vm" class="menu-item menu-item-danger" disabled>
+                        <span class="menu-icon">■</span> Stop VM
+                    </button>
+                    <div class="menu-divider"></div>
+                    <button id="ctx-delete-connection" class="menu-item menu-item-danger">
+                        <span class="menu-icon">🗑️</span> Delete Connection
+                    </button>
+                </div>
 
                 <!-- Right Panel: Connection Details / New Connection -->
                 <section class="panel details-panel">
@@ -166,14 +187,11 @@
 
                             <!-- Primary Actions -->
                             <div class="primary-actions">
-                                <button id="start-tunnel-btn" class="btn btn-primary" disabled>
+                                <button id="toggle-tunnel-btn" class="btn btn-primary" disabled>
                                     Start Tunnel
                                 </button>
                                 <button id="connect-freerdp-btn" class="btn btn-primary" disabled>
                                     Connect (FreeRDP)
-                                </button>
-                                <button id="stop-tunnel-btn" class="btn btn-danger" disabled>
-                                    Stop Tunnel
                                 </button>
                                 <button id="copy-address-btn" class="btn btn-secondary" disabled>
                                     Copy Address
