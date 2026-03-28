@@ -812,6 +812,33 @@ html, body {
     color: var(--accent-danger);
 }
 
+.vm-status.staging, .vm-status.suspending, .vm-status.stopping, .vm-status.provisioning {
+    background: rgba(255, 209, 102, 0.2);
+    color: var(--accent-warning);
+}
+
+.vm-status-value {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.btn-refresh {
+    background: none;
+    border: none;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 14px;
+    padding: 2px 4px;
+    border-radius: 4px;
+    line-height: 1;
+}
+
+.btn-refresh:hover {
+    color: var(--text-primary);
+    background: var(--bg-tertiary);
+}
+
 /* OS Indicator */
 .os-icon {
     font-size: 14px;

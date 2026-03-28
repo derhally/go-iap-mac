@@ -17,6 +17,9 @@ const state = {
         vm: null
     },
     isStartingTunnel: false,
+    vmStatus: null,           // Current VM status for selected connection
+    vmStatusRequestId: 0,     // Guard against stale async VM status results
+    isVmOperationInProgress: false, // True while a start/stop VM operation is running
     currentView: 'new', // 'new', 'details', 'empty'
     pendingRestartNotification: false // Flag to show restart notification after password modal closes
 };
@@ -56,6 +59,8 @@ const elements = {
     detailProject: document.getElementById('detail-project'),
     detailVm: document.getElementById('detail-vm'),
     detailZone: document.getElementById('detail-zone'),
+    detailVmStatus: document.getElementById('detail-vm-status'),
+    refreshVmStatusBtn: document.getElementById('refresh-vm-status-btn'),
     detailAddress: document.getElementById('detail-address'),
     startTunnelBtn: document.getElementById('start-tunnel-btn'),
     connectFreeRDPBtn: document.getElementById('connect-freerdp-btn'),
@@ -388,10 +393,13 @@ function selectConnection(connectionId) {
     
     // Update bookmark status
     updateBookmarkStatusDisplay(conn);
-    
+
     // Update tunnel status (running/stopped)
     updateConnectionStatus();
-    
+
+    // Fetch VM status on-demand
+    fetchVmStatus(conn);
+
     // Show details view
     showView('details');
     renderConnectionsList();
@@ -1234,6 +1242,49 @@ function copyCredential(elementId) {
     });
 }
 
+// ==================== VM Status ====================
+
+async function fetchVmStatus(conn) {
+    if (!conn) return;
+
+    const requestId = ++state.vmStatusRequestId;
+    state.vmStatus = null;
+    updateVmStatusDisplay('Loading...');
+
+    try {
+        const status = await window.go.main.App.GetVMStatus(conn.projectId, conn.zone, conn.vmName);
+        // Only update if this is still the current request
+        if (requestId === state.vmStatusRequestId) {
+            state.vmStatus = status;
+            updateVmStatusDisplay(status);
+            updateButtons();
+        }
+    } catch (error) {
+        if (requestId === state.vmStatusRequestId) {
+            state.vmStatus = null;
+            updateVmStatusDisplay('Unknown');
+            showToast('Failed to fetch VM status: ' + (error?.message || String(error)), 'error');
+        }
+    }
+}
+
+function updateVmStatusDisplay(status) {
+    const el = elements.detailVmStatus;
+    if (!el) return;
+
+    // Remove all status classes
+    el.className = 'vm-status';
+
+    if (!status || status === 'Unknown' || status === 'Loading...') {
+        el.textContent = status || '-';
+        return;
+    }
+
+    const statusLower = status.toLowerCase();
+    el.textContent = status;
+    el.classList.add(statusLower);
+}
+
 // ==================== UI Helpers ====================
 
 function showView(view) {
@@ -1353,6 +1404,9 @@ function setupEventListeners() {
     elements.menuCreateBookmark.addEventListener('click', createWindowsAppBookmark);
     elements.menuGeneratePassword.addEventListener('click', generateWindowsPassword);
     elements.menuDeleteConnection.addEventListener('click', deleteConnection);
+    elements.refreshVmStatusBtn.addEventListener('click', () => {
+        if (state.selectedConnection) fetchVmStatus(state.selectedConnection);
+    });
     elements.startTunnelBtn.addEventListener('click', startTunnel);
     elements.connectFreeRDPBtn.addEventListener('click', connectWithFreeRDP);
     elements.stopTunnelBtn.addEventListener('click', stopTunnel);
