@@ -908,6 +908,90 @@ func (a *App) ListVMs(projectID, filter string) ([]VM, error) {
 	return vms, nil
 }
 
+// GetVMStatus returns the current status of a VM instance (e.g., "RUNNING", "STOPPED", "TERMINATED")
+func (a *App) GetVMStatus(projectID, zone, instanceName string) (string, error) {
+	if a.tokenSource == nil {
+		return "", fmt.Errorf("not authenticated")
+	}
+
+	computeService, err := compute.NewService(a.ctx, option.WithTokenSource(a.tokenSource))
+	if err != nil {
+		return "", fmt.Errorf("failed to create compute service: %w", err)
+	}
+
+	instance, err := computeService.Instances.Get(projectID, zone, instanceName).Do()
+	if err != nil {
+		return "", fmt.Errorf("failed to get VM status: %w", err)
+	}
+
+	return instance.Status, nil
+}
+
+// StartVM starts a stopped VM instance and waits for the operation to complete
+func (a *App) StartVM(projectID, zone, instanceName string) error {
+	if a.tokenSource == nil {
+		return fmt.Errorf("not authenticated")
+	}
+
+	computeService, err := compute.NewService(a.ctx, option.WithTokenSource(a.tokenSource))
+	if err != nil {
+		return fmt.Errorf("failed to create compute service: %w", err)
+	}
+
+	op, err := computeService.Instances.Start(projectID, zone, instanceName).Do()
+	if err != nil {
+		return fmt.Errorf("failed to start VM: %w", err)
+	}
+
+	return a.waitForOperation(computeService, projectID, zone, op.Name)
+}
+
+// StopVM stops a running VM instance and waits for the operation to complete
+func (a *App) StopVM(projectID, zone, instanceName string) error {
+	if a.tokenSource == nil {
+		return fmt.Errorf("not authenticated")
+	}
+
+	computeService, err := compute.NewService(a.ctx, option.WithTokenSource(a.tokenSource))
+	if err != nil {
+		return fmt.Errorf("failed to create compute service: %w", err)
+	}
+
+	op, err := computeService.Instances.Stop(projectID, zone, instanceName).Do()
+	if err != nil {
+		return fmt.Errorf("failed to stop VM: %w", err)
+	}
+
+	return a.waitForOperation(computeService, projectID, zone, op.Name)
+}
+
+// waitForOperation polls a GCP zone operation until it completes or times out
+func (a *App) waitForOperation(computeService *compute.Service, projectID, zone, operationName string) error {
+	ctx, cancel := context.WithTimeout(a.ctx, 120*time.Second)
+	defer cancel()
+
+	for {
+		op, err := computeService.ZoneOperations.Get(projectID, zone, operationName).Context(ctx).Do()
+		if err != nil {
+			return fmt.Errorf("failed to check operation status: %w", err)
+		}
+
+		if op.Status == "DONE" {
+			if op.Error != nil && len(op.Error.Errors) > 0 {
+				return fmt.Errorf("operation failed: %s", op.Error.Errors[0].Message)
+			}
+			return nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("operation timed out after 120 seconds")
+		case <-time.After(2 * time.Second):
+			// continue polling
+		}
+	}
+}
+
 // GetFreePort finds an available local port that is not used by any active tunnel
 func (a *App) GetFreePort() (int, error) {
 	// Try up to 10 times to find a port not used by our tunnels
