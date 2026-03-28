@@ -442,6 +442,12 @@ html, body {
 }
 
 /* Primary Actions */
+.vm-actions {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 12px;
+}
+
 .primary-actions {
     display: flex;
     gap: 10px;
@@ -952,6 +958,15 @@ html, body {
 
 .btn-danger:hover:not(:disabled) {
     background: #d63d5e;
+}
+
+.btn-success {
+    background: var(--accent-success);
+    color: #1a1a2e;
+}
+
+.btn-success:hover:not(:disabled) {
+    background: #05c090;
 }
 
 .btn-secondary {

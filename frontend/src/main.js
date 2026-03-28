@@ -62,6 +62,8 @@ const elements = {
     detailVmStatus: document.getElementById('detail-vm-status'),
     refreshVmStatusBtn: document.getElementById('refresh-vm-status-btn'),
     detailAddress: document.getElementById('detail-address'),
+    startVmBtn: document.getElementById('start-vm-btn'),
+    stopVmBtn: document.getElementById('stop-vm-btn'),
     startTunnelBtn: document.getElementById('start-tunnel-btn'),
     connectFreeRDPBtn: document.getElementById('connect-freerdp-btn'),
     stopTunnelBtn: document.getElementById('stop-tunnel-btn'),
@@ -1242,6 +1244,58 @@ function copyCredential(elementId) {
     });
 }
 
+// ==================== VM Control ====================
+
+async function startVM(conn) {
+    conn = conn || state.selectedConnection;
+    if (!conn) return;
+
+    state.isVmOperationInProgress = true;
+    updateButtons();
+    showLoadingModal('Starting VM...');
+
+    try {
+        await window.go.main.App.StartVM(conn.projectId, conn.zone, conn.vmName);
+        showToast('VM started successfully', 'success');
+        // Refresh status after operation
+        await fetchVmStatus(conn);
+    } catch (error) {
+        showToast('Failed to start VM: ' + (error?.message || String(error)), 'error');
+    } finally {
+        state.isVmOperationInProgress = false;
+        hideLoadingModal();
+        updateButtons();
+    }
+}
+
+async function stopVM(conn) {
+    conn = conn || state.selectedConnection;
+    if (!conn) return;
+
+    const confirmed = await showConfirm(
+        'Stop VM',
+        `Are you sure you want to stop "${conn.vmName}"? This will interrupt any running workloads on the VM.`
+    );
+    if (!confirmed) return;
+
+    state.isVmOperationInProgress = true;
+    updateButtons();
+    showLoadingModal('Stopping VM...');
+
+    try {
+        await window.go.main.App.StopVM(conn.projectId, conn.zone, conn.vmName);
+        showToast('VM stopped successfully', 'success');
+        // Refresh status after operation
+        await fetchVmStatus(conn);
+    } catch (error) {
+        showToast('Failed to stop VM: ' + (error?.message || String(error)), 'error');
+    } finally {
+        state.isVmOperationInProgress = false;
+        hideLoadingModal();
+        updateButtons();
+    }
+}
+
 // ==================== VM Status ====================
 
 async function fetchVmStatus(conn) {
@@ -1322,13 +1376,22 @@ function updateButtons() {
         const activeTunnel = getActiveConnectionTunnel(state.selectedConnection);
         const hasActive = activeTunnel != null;
         const isRunning = activeTunnel && activeTunnel.status === 'running';
-        
+
         elements.startTunnelBtn.disabled = state.isStartingTunnel || hasActive;
         elements.connectFreeRDPBtn.disabled = !state.freeRDPInstalled || state.isStartingTunnel || (hasActive && !isRunning);
         elements.connectFreeRDPBtn.classList.toggle('hidden', !state.freeRDPInstalled);
         elements.stopTunnelBtn.disabled = !hasActive;
         elements.copyAddressBtn.disabled = false; // Always enabled - port is fixed
-        
+
+        // VM control buttons
+        const vmStatus = state.vmStatus;
+        const isTransitional = vmStatus && ['STAGING', 'SUSPENDING', 'STOPPING', 'PROVISIONING'].includes(vmStatus);
+        const vmStopped = vmStatus && (vmStatus === 'STOPPED' || vmStatus === 'TERMINATED');
+        const vmRunning = vmStatus === 'RUNNING';
+
+        elements.startVmBtn.disabled = state.isVmOperationInProgress || !vmStopped || isTransitional;
+        elements.stopVmBtn.disabled = state.isVmOperationInProgress || !vmRunning || isTransitional;
+
         // Menu items
         elements.menuCreateBookmark.disabled = !state.windowsAppInstalled;
         elements.menuCreateBookmark.classList.toggle('hidden', !state.windowsAppInstalled);
@@ -1407,6 +1470,8 @@ function setupEventListeners() {
     elements.refreshVmStatusBtn.addEventListener('click', () => {
         if (state.selectedConnection) fetchVmStatus(state.selectedConnection);
     });
+    elements.startVmBtn.addEventListener('click', () => startVM());
+    elements.stopVmBtn.addEventListener('click', () => stopVM());
     elements.startTunnelBtn.addEventListener('click', startTunnel);
     elements.connectFreeRDPBtn.addEventListener('click', connectWithFreeRDP);
     elements.stopTunnelBtn.addEventListener('click', stopTunnel);
